@@ -21,7 +21,6 @@ use std::path::PathBuf;
 use std::collections::HashSet;
 
 use crate::node::build_node;
-use std::fs::DirEntry;
 
 use crate::node::FileTime;
 use crate::platform::get_metadata;
@@ -125,13 +124,16 @@ fn sort_by_inode(a: &Node, b: &Node) -> std::cmp::Ordering {
     }
 }
 
-fn ignore_file(entry: &DirEntry, walk_data: &WalkData) -> bool {
-    let is_dot_file = entry.file_name().to_str().unwrap_or("").starts_with('.');
-    let is_ignored_path = walk_data.ignore_directories.contains(&entry.path());
-    let follow_links = walk_data.follow_links && entry.file_type().is_ok_and(|ft| ft.is_symlink());
+fn ignore_file(entry: &Path, walk_data: &WalkData) -> bool {
+    let is_dot_file = entry
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with('.'));
+    let is_ignored_path = walk_data.ignore_directories.contains(entry);
+    let follow_links = walk_data.follow_links && entry.is_symlink();
 
     if !walk_data.allowed_filesystems.is_empty() {
-        let size_inode_device = get_metadata(entry.path(), false, follow_links);
+        let size_inode_device = get_metadata(entry, false, follow_links);
         if let Some((_size, Some((_id, dev)), _gunk)) = size_inode_device {
             if !walk_data.allowed_filesystems.contains(&dev) {
                 return true;
@@ -142,9 +144,9 @@ fn ignore_file(entry: &DirEntry, walk_data: &WalkData) -> bool {
         || walk_data.filter_modified_time.is_some()
         || walk_data.filter_changed_time.is_some()
     {
-        let size_inode_device = get_metadata(entry.path(), false, follow_links);
+        let size_inode_device = get_metadata(entry, false, follow_links);
         if let Some((_, _, (modified_time, accessed_time, changed_time))) = size_inode_device {
-            if entry.path().is_file()
+            if entry.is_file()
                 && [
                     (&walk_data.filter_modified_time, modified_time),
                     (&walk_data.filter_accessed_time, accessed_time),
@@ -162,15 +164,15 @@ fn ignore_file(entry: &DirEntry, walk_data: &WalkData) -> bool {
 
     // Keeping `walk_data.filter_regex.is_empty()` is important for performance reasons, it stops unnecessary work
     if !walk_data.filter_regex.is_empty()
-        && entry.path().is_file()
-        && is_filtered_out_due_to_regex(walk_data.filter_regex, &entry.path())
+        && entry.is_file()
+        && is_filtered_out_due_to_regex(walk_data.filter_regex, entry)
     {
         return true;
     }
 
     if !walk_data.invert_filter_regex.is_empty()
-        && entry.path().is_file()
-        && is_filtered_out_due_to_invert_regex(walk_data.invert_filter_regex, &entry.path())
+        && entry.is_file()
+        && is_filtered_out_due_to_invert_regex(walk_data.invert_filter_regex, entry)
     {
         return true;
     }
@@ -202,7 +204,7 @@ fn walk(dir: PathBuf, walk_data: &WalkData, depth: usize) -> Option<Node> {
 
                                 // return walk(entry.path(), walk_data, depth)
 
-                                if !ignore_file(entry, walk_data) {
+                                if !ignore_file(&entry.path(), walk_data) {
                                     if let Ok(data) = entry.file_type() {
                                         if data.is_dir()
                                             || (walk_data.follow_links && data.is_symlink())
@@ -268,6 +270,10 @@ fn walk(dir: PathBuf, walk_data: &WalkData, depth: usize) -> Option<Node> {
 }
 
 fn handle_error_and_retry(failed: &Error, dir: &Path, walk_data: &WalkData) -> bool {
+    if !ignore_file(dir, walk_data) {
+        return false;
+    }
+
     let mut editable_error = walk_data.errors.lock().unwrap();
     match failed.kind() {
         std::io::ErrorKind::PermissionDenied => {
